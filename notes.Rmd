@@ -1,0 +1,218 @@
+---
+title: "notes from in the class"
+author: "andrew"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+editor_options: 
+  chunk_output_type: console
+---
+
+## 
+
+<!-- antibiotics  -->
+
+<!-- with this approach we are measuring the relative abundance.  -->
+
+<!-- with all the caveats -- not perfect, biases according to group -- depending on the group, they may be more or less flexible -->
+
+<!-- the relative abundance is  -->
+
+<!-- should we just use incidence -- people have tried, but  -->
+
+<!-- modelling composition -- microbial data is compositional and that's not optional -->
+
+<!-- there's a transformation that people do use -- normalizing? making everything into ratios? -->
+
+<!-- the number of samples -->
+
+<!-- the number of sequences matters -- 10000 reads finds more rare things than a sample with 100 reads -->
+
+<!-- seires of poissons with offsets for the number of reads??? -->
+
+<!-- that would be  -->
+
+<!-- nromalizing the amount of DNA that goes in -->
+
+<!-- not like a quadrat with relative abundance,  -->
+<!-- I'm going to count the first 10 individuals -->
+
+<!-- bacteria  -->
+
+<!-- data are relative abundances -->
+
+a poisson distribution uses a log link, and a very common way to control for effort is to add a log(effort) to the model, like this:
+
+abd ~ b0 + log(effort)
+
+another interesting fact is that the multinomial distribution can be modelled as a bunch of poissons, and you can add them all together and calculate relative abundance by dividing each by a the sum total. 
+
+so if we put these two facts together, it should be possible to model the relative abundance of species (controlling for effort) with an offset term
+
+
+library size is the number of samples we have extracted from the community.
+
+```{r}
+#1s are the taxon of interest, 0s are anything else
+
+true_community <- rbinom(1e5, prob =.01, size = 1)
+
+#take samples of known size out of the community
+
+effort <- rep(c(10L, 50L, 100L, 1000L), each = 10)
+
+found_ones <- sapply(effort, function(x) sum(sample(true_community, size = x, replace = FALSE)))
+
+mod <- glm(found_ones ~ 1 + offset(log(effort)), family = poisson())
+
+exp(coef(mod))
+
+# or, identically
+
+mod_binom <- glm(cbind(found_ones, effort - found_ones) ~ 1, family = binomial())
+plogis(coef(mod_binom))
+```
+
+hmmm. would an N-mixture model be appropriate here? 
+
+
+sometimes losing 20 to 30 % of the sample because of super low DNA in the sample
+
+
+```{r}
+true_community <- rbinom(1e5, prob =.01, size = 1)
+
+# all samples of a different size
+lib_size <- sample(100:7000, size = 15, replace = TRUE)
+
+found_ones <- sapply(lib_size, function(x) sum(sample(true_community, size = x, replace = FALSE)))
+
+cbind(lib_size, found_ones)
+
+glm(found_ones ~ 1 + offset(log(lib_size)), family = poisson()) |> 
+  coef() |> 
+  exp()
+```
+
+### try it with multiple ASVs
+
+generate one true community with a known number of species in it 
+
+```{r}
+nn <- rlnorm(26, 2, 2)
+true_ps <- nn/sum(nn)
+
+true_ps
+```
+
+```{r}
+true_multispecies_community <- sample(LETTERS, 1e5, replace = TRUE, prob = true_ps)
+
+counts <- true_multispecies_community |> table()
+
+plot(true_ps, counts/1e5)
+
+
+```
+
+do microbial ecologists ever calculate *preston plots*? do we?
+
+the full community has the same distribution as the true vector.
+
+
+Now to draw samples of different size from this true community
+
+```{r}
+
+
+# all samples of a different size
+lib_size <- sample(100:7000, size = 35, replace = TRUE)
+
+many_samples <- sapply(lib_size, function(x) sample(true_multispecies_community, size = x, replace = FALSE))
+
+library(tidyverse)
+
+sample_df <- many_samples |> lapply(table) |> 
+  map_dfr(enframe, name = "ASV", value = "reads", .id = "sample_id") |> 
+  mutate(lib_size = lib_size[as.numeric(sample_id)],
+         reads = as.numeric(reads))
+
+
+```
+
+look at the samples
+
+```{r}
+sample_df |> 
+  count(lib_size) |> 
+  ggplot(aes(x = lib_size, y = n)) + geom_point()
+```
+
+Richness is different among samples of different size.
+
+let's look at observed relative abundance
+
+```{r}
+sample_df |> 
+  mutate(obs_relabd = reads / lib_size,
+         ASV = forcats::fct_reorder(ASV, obs_relabd, .desc = TRUE)) |> 
+  ggplot(aes(x = ASV, y = obs_relabd, group = sample_id)) + 
+  geom_line() + 
+  coord_trans(y = "log")
+```
+
+lots of variation
+
+another way is a rank-abd plot:
+
+
+```{r}
+sample_df |> 
+  group_by(sample_id) |> 
+  mutate(obs_relabd = reads / lib_size,
+         rank = dense_rank(desc(obs_relabd))) |> 
+  ggplot(aes(x = rank, y = obs_relabd, group = sample_id)) + 
+  geom_line() + 
+  coord_trans(y = "log")
+```
+
+
+finally try with an offset Poisson:
+
+```{r}
+library(lme4)
+multispp_mod <- glmer(reads ~ 1 + offset(log(lib_size)) + (1 | ASV), family = poisson(), data = sample_df)
+
+summary(multispp_mod)
+
+
+empirical_prop <- exp(coef(multispp_mod)$ASV)
+
+
+# get the true probs
+
+true_w_names <- setNames(true_ps, LETTERS)
+
+empirical_prop |> 
+  rownames_to_column(var = "ASV") |> 
+  mutate(true_p = true_w_names[ASV]) |> 
+  ggplot(aes(x = true_p, y = `(Intercept)`)) + geom_point() + 
+  geom_abline(slope = 1, intercept = 0)
+
+```
+
+should compare to empirical estimates
+
+```{r}
+sample_df |> 
+  mutate(obs_relabd = reads / lib_size,
+         true_p = true_w_names[ASV])|> 
+  ggplot(aes(x = true_p, y = obs_relabd)) + 
+  geom_point() + 
+  coord_trans(y = "log", x = "log") + 
+  geom_abline(slope = 1, intercept = 0)
+  
+```
+
